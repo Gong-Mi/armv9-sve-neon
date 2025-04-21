@@ -1,51 +1,97 @@
-name: Compare Pi Calc NEON vs SVE on Native Arm Runner
+name: 在原生 Arm Runner 上比较 Pi 计算的 NEON 与 SVE 性能
 
-on: [push, workflow_dispatch] # Trigger on push or manually
+on:
+  push: # 在代码推送到任何分支时触发
+  workflow_dispatch: # 允许从 Actions 选项卡手动触发
 
 jobs:
   compare_pi_perf:
     # 使用特定版本的原生 Arm64 Runner (Ubuntu 24.04) 以保证环境一致性
-    # 这是基于 Azure Cobalt 100 / Neoverse N2 核心的
+    # 这是基于 Azure Cobalt 100 / Arm Neoverse N2 核心的
+    name: 在原生 Arm64 (ubuntu-24.04) 上运行 Pi 性能比较
     runs-on: ubuntu-24.04-arm
 
     steps:
-    - name: Checkout code
+    - name: 签出代码
       # 获取你仓库中的代码
       uses: actions/checkout@v4
+      displayName: 签出代码 (Checkout Code)
 
-    - name: Install Compiler (Clang recommended) and Utils
+    - name: 安装编译依赖
+      # 安装 clang (推荐，对 Arm 支持良好) 和 build-essential (提供 make, gcc 等工具)
       run: |
-        sudo apt-get update
-        # 安装 clang 和 build-essential (提供 make 等工具)
+        sudo apt-get update -qq
         sudo apt-get install -y clang build-essential
+      displayName: 安装 Clang 和构建工具
 
-    - name: Check Compiler Version
+    - name: 检查 Clang 版本
       # 打印编译器版本信息，方便调试和记录
       run: clang --version
+      displayName: 检查 Clang 编译器版本
 
-    - name: Check SVE Width (using svcntb)
-      # 编译并运行一个小的检查程序，确认 SVE 位宽
-      # 这对于验证 Runner 环境至关重要
+    - name: 检测 SVE 向量宽度 (运行时)
+      # 编译并运行一个小程序来检测运行时的 SVE 向量宽度。
+      # 这对于确认 Runner 环境的 SVE 能力至关重要。
+      # Neoverse N2 核心通常具有 128 位 SVE。
       run: |
-        echo '#include <stdio.h>' > width_check.c
-        echo '#include <arm_sve.h>' >> width_check.c
-        echo '#include <stdint.h>' >> width_check.c
-        echo 'int main() { uint64_t bytes = svcntb(); if(bytes==0) return 1; printf("SVE Width: %llu bits\\n", (unsigned long long)bytes*8); return 0; }' >> width_check.c
-        clang width_check.c -o width_check -march=armv9-a -lm
-        echo "--- Running SVE Width Check ---"
-        ./width_check
-        echo "--- SVE Width Check End ---"
+        cat <<EOF > width_check.c
+        #include <stdio.h>
+        #include <arm_sve.h> // SVE intrinsics 头文件
+        #include <stdint.h>  // 用于 uint64_t 类型
 
-    - name: Compile the Pi comparison code
-      # 确保下面的 C 文件名与你仓库中的文件名完全一致！
-      # 使用 clang (或根据需要改为 gcc)
-      # 使用 -march=armv9-a 同时启用 NEON 和 SVE/SVE2
-      # 添加 -Wall -Wextra 捕获更多潜在的编译警告
-      # 使用 -O3 进行优化
-      run: clang pi_compare_combined_fixed_v4.c -o pi_compare_combined -O3 -march=armv9-a -lm -Wall -Wextra
+        int main() {
+            // svcntb() 返回 SVE 向量寄存器中的字节数。
+            // 如果 SVE 不支持或未启用，则返回 0。
+            uint64_t bytes = svcntb();
+            if (bytes == 0) {
+                printf("SVE 不支持或未启用 (svcntb() 返回 0)。\n");
+                return 1; // 表示失败
+            }
+            // SVE 位宽 (比特) = 字节数 * 8
+            printf("检测到的 SVE 宽度: %llu bits\n", (unsigned long long)bytes * 8);
+            return 0; // 表示成功
+        }
+        EOF
+        # 使用 -march=armv9-a 编译 (意味着支持 SVE/SVE2)
+        clang width_check.c -o width_check -march=armv9-a
+        echo "--- 开始运行 SVE 宽度检查 ---"
+        ./width_check # 执行检查
+        echo "--- SVE 宽度检查结束 ---"
+      displayName: 检测 SVE 向量宽度
 
-    - name: Run the Pi comparison
-      # 设置一个合理的 N 值，例如 5 亿次，避免运行时间过长
-      # 在 Runner 环境中，通常不指定 target_core 参数，让程序在允许的核心上运行
-      # 程序内部逻辑会检测 GITHUB_ACTIONS 环境变量并跳过亲和性设置
-      run: ./pi_compare_combined 500000000
+    - name: 编译 Pi 比较代码
+      # !!! 重要: 请确保下面的 'pi_compare_combined_fixed_v4.c' 与你仓库中的实际 C 文件名完全一致！!!!
+      # 使用 clang 进行编译。
+      # -march=armv9-a: 目标为 Armv9-A 架构，启用 NEON、SVE 和 SVE2 特性。
+      #                这允许编译器生成两种代码，前提是你的 C 代码使用了 intrinsics 或依赖自动向量化来区分 NEON 和 SVE 路径。
+      # -O3: 启用高级别优化，对性能比较至关重要。
+      # -lm: 链接数学库 (如果你的 C 代码中使用了 math.h 里的函数，如 sqrt, pow 等)。
+      # -Wall -Wextra: 启用常见和额外的编译警告，帮助发现潜在问题。
+      run: |
+        clang pi_compare_combined_fixed_v4.c -o pi_compare_combined \
+          -O3 -march=armv9-a -lm -Wall -Wextra
+      # ^-- 请将 'pi_compare_combined_fixed_v4.c' 替换为你的实际文件名！
+      displayName: 编译 Pi 比较程序 (pi_compare_combined_fixed_v4.c)
+
+    - name: 执行基准测试
+      # 设置一个合理的 N 值 (例如 5 亿次迭代) 以避免运行时间过长。
+      # C 代码最好能检测 GITHUB_ACTIONS 环境变量 (通常会自动设置)
+      # 并跳过可能在 CI 环境中失败或不适用的 CPU 亲和性设置 (如 taskset)。
+      # Runner 环境会自行管理 CPU 分配。
+      run: |
+        echo "--- 开始运行 Pi 性能比较 (N=500,000,000) ---"
+        # 执行编译好的程序，并将迭代次数作为命令行参数传递
+        ./pi_compare_combined 500000000
+        echo "--- Pi 性能比较结束 ---"
+      displayName: 执行基准测试 (N=5亿)
+
+    - name: 上传编译产物 (Artifacts)
+      # 将编译生成的可执行文件打包上传，方便下载查看或后续使用。
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-binaries-arm64 # Artifact 的名称
+        path: | # 要上传的文件路径，每行一个
+          pi_compare_combined
+          width_check
+        if-no-files-found: warn # 如果找不到文件，发出警告而不是错误
+      displayName: 打包并上传可执行文件
