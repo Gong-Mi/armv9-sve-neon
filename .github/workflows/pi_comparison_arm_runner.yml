@@ -56,9 +56,9 @@ jobs:
     - name: 编译 Pi 比较程序 (pi_compare_combined_fixed_v4.c) # Step 的名称
       # !!! 重要: 请确保下面的 'pi_compare_combined_fixed_v4.c' 与你仓库中的实际 C 文件名完全一致！!!!
       run: |
-        clang pi_compare_combined_fixed_v4.c -o pi_compare_combined \
-          -O3 -march=armv9-a -lm -Wall -Wextra
-      # 移除 displayName
+     clang pi_compare_combined_fixed_v4.c -o pi_compare_combined_static \
+  -O3 -march=armv9-a -lm -Wall -Wextra -static
+     # 移除 displayName
 
     - name: 执行基准测试 (N=5亿) # Step 的名称
       # 设置一个合理的 N 值 (例如 5 亿次迭代)
