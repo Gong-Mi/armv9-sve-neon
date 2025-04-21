@@ -1,80 +1,131 @@
+# 工作流程名称
 name: 在原生 Arm Runner 上比较 Pi 计算的 NEON 与 SVE 性能
 
+# 触发条件：推送到任何分支 或 手动触发
 on:
-  push: # 在代码推送到任何分支时触发
-  workflow_dispatch: # 允许从 Actions 选项卡手动触发
+  push:
+  workflow_dispatch:
 
+# 定义工作流程中的任务 (Job)
 jobs:
+  # 任务 ID
   compare_pi_perf:
-    # 使用特定版本的原生 Arm64 Runner (Ubuntu 24.04) 以保证环境一致性
-    # 这是基于 Azure Cobalt 100 / Arm Neoverse N2 核心的
-    name: 在原生 Arm64 (ubuntu-24.04) 上运行 Pi 性能比较 # Job 的显示名称
+    # 任务在 GitHub Actions UI 中显示的名称
+    name: 在原生 Arm64 (ubuntu-24.04) 上运行 Pi 性能比较
+    # 指定运行此任务的 Runner 类型
+    # ubuntu-24.04-arm64 提供原生 Armv8/Armv9 环境，支持 SVE
     runs-on: ubuntu-24.04-arm
 
+    # 任务包含的一系列步骤 (按顺序执行)
     steps:
-    - name: 签出代码 (Checkout Code) # Step 的名称，用于 UI 显示
-      # 获取你仓库中的代码
+    # 第 1 步：签出代码
+    - name: 签出代码 (Checkout Code)
+      # 使用 GitHub官方的 checkout action 获取仓库代码
       uses: actions/checkout@v4
-      # 移除 displayName: 签出代码 (Checkout Code)
 
-    - name: 安装 Clang 和构建工具 # Step 的名称
-      # 安装 clang (推荐，对 Arm 支持良好) 和 build-essential (提供 make, gcc 等工具)
+    # 第 2 步：安装编译环境
+    - name: 安装 Clang 和构建工具
+      # 运行 shell 命令
       run: |
+        # 更新 apt 包列表 (使用 -qq 减少日志输出)
         sudo apt-get update -qq
-        sudo apt-get install -y clang build-essential
-      # 移除 displayName: 安装 Clang 和构建工具
+        # 安装 Clang 编译器, build-essential (包含 make, gcc, libc-dev 等基础构建工具),
+        # 和 binutils (包含 ldd 等二进制工具)
+        # 使用 -y 自动确认安装
+        sudo apt-get install -y clang build-essential binutils
 
-    - name: 检查 Clang 编译器版本 # Step 的名称
-      # 打印编译器版本信息，方便调试和记录
-      run: clang --version
-      # 移除 displayName
-
-    - name: 检测 SVE 向量宽度 # Step 的名称
-      # 编译并运行一个小程序来检测运行时的 SVE 向量宽度。
+    # 第 3 步：检查编译器版本
+    - name: 检查 Clang 编译器版本
       run: |
+        echo "--- Clang 版本信息 ---"
+        clang --version
+        echo "---------------------"
+
+    # 第 4 步：检测 SVE 宽度并检查
+    - name: 检测 SVE 向量宽度并检查
+      run: |
+        # 使用 cat 和 EOF 创建一个临时的 C 源码文件
         cat <<EOF > width_check.c
-        #include <stdio.h>
-        #include <arm_sve.h>
-        #include <stdint.h>
+        #include <stdio.h>      // 标准输入输出
+        #include <arm_sve.h>    // SVE intrinsics 头文件 (包含 svcntb)
+        #include <stdint.h>     // 标准整型，如 uint64_t
 
         int main() {
+            // svcntb() 返回 SVE 向量寄存器的字节数。如果 SVE 不可用则返回 0。
             uint64_t bytes = svcntb();
             if (bytes == 0) {
                 printf("SVE 不支持或未启用 (svcntb() 返回 0)。\n");
-                return 1;
+                return 1; // 返回非零表示失败
             }
+            // 将字节数乘以 8 得到比特数
             printf("检测到的 SVE 宽度: %llu bits\n", (unsigned long long)bytes * 8);
-            return 0;
+            return 0; // 返回 0 表示成功
         }
         EOF
-        clang width_check.c -o width_check -march=armv9-a
+
+        echo "--- 开始编译 SVE 宽度检查程序 ---"
+        # 编译 C 文件，输出为 width_check，目标架构 armv9-a (包含SVE)
+        # || exit 1 表示如果 clang 命令失败（返回非零退出码），则立即停止此步骤并标记为失败
+        clang width_check.c -o width_check -march=armv9-a || exit 1
+
+        echo "--- 编译完成，检查生成的文件 (width_check) ---"
+        # 列出文件详细信息 (大小、权限等)
+        ls -l width_check
+        # 检查文件类型 (应为 aarch64 ELF 可执行文件)
+        file width_check
+        # 检查动态库依赖 (对于简单程序可能很少或没有)
+        # || echo ... 避免 ldd 失败导致整个步骤失败 (例如静态链接时)
+        ldd width_check || echo "ldd 在 width_check 上失败 (可能是静态链接或非常简单)"
+
         echo "--- 开始运行 SVE 宽度检查 ---"
+        # 执行编译好的程序
         ./width_check
         echo "--- SVE 宽度检查结束 ---"
-      # 移除 displayName
 
-    - name: 编译 Pi 比较程序 (pi_compare_combined_fixed_v4.c) # Step 的名称
-      # !!! 重要: 请确保下面的 'pi_compare_combined_fixed_v4.c' 与你仓库中的实际 C 文件名完全一致！!!!
+    # 第 5 步：编译 Pi 比较程序并检查
+    - name: 编译 Pi 比较程序 并检查
       run: |
-     clang pi_compare_combined_fixed_v4.c -o pi_compare_combined_static \
-  -O3 -march=armv9-a -lm -Wall -Wextra -static
-     # 移除 displayName
+        echo "--- 开始编译 Pi 比较程序 ---"
+        # !!! 下一行的 'pi_compare_combined_fixed_v4.c' 需要替换为你实际的 C 文件名 !!!
+        clang pi_compare_combined_fixed_v4.c -o pi_compare_combined \
+          -O3 -march=armv9-a -lm -Wall -Wextra || exit 1
+        # 参数解释:
+        #   pi_compare_combined_fixed_v4.c: 输入的 C 源代码文件 (请替换!)
+        #   -o pi_compare_combined: 指定输出的可执行文件名
+        #   -O3: 启用高级别优化
+        #   -march=armv9-a: 指定目标架构为 Armv9-A (支持 NEON 和 SVE/SVE2)
+        #   -lm: 链接数学库 (如果代码用到 math.h 中的函数)
+        #   -Wall -Wextra: 开启更多编译警告
+        #   || exit 1: 如果编译失败则中止
 
-    - name: 执行基准测试 (N=5亿) # Step 的名称
-      # 设置一个合理的 N 值 (例如 5 亿次迭代)
+        echo "--- 编译完成，检查生成的文件 (pi_compare_combined) ---"
+        # 检查生成的可执行文件
+        ls -l pi_compare_combined
+        file pi_compare_combined
+        echo "--- 检查动态库依赖 (ldd for pi_compare_combined) ---"
+        # 检查主程序的动态库依赖，看是否有 "not found"
+        ldd pi_compare_combined || echo "ldd 命令失败或文件非动态链接"
+
+    # 第 6 步：执行基准测试
+    - name: 执行基准测试 (N=5亿)
       run: |
         echo "--- 开始运行 Pi 性能比较 (N=500,000,000) ---"
+        # 执行编译好的程序，并传递参数 500000000 (假设你的程序接受这个参数)
+        # 使用 ./ 明确指定运行当前目录下的文件
         ./pi_compare_combined 500000000
         echo "--- Pi 性能比较结束 ---"
-      # 移除 displayName
 
-    - name: 打包并上传可执行文件 # Step 的名称
-      # 将编译生成的可执行文件打包上传
+    # 第 7 步：上传构建产物
+    - name: 打包并上传可执行文件
+      # 使用官方的 upload-artifact action
       uses: actions/upload-artifact@v4
+      # 配置 action
       with:
-        name: compiled-binaries-arm64 # Artifact 的名称
-        path: | # 要上传的文件路径
+        # 上传的压缩包名称 (在 Actions 运行结果页面显示)
+        name: compiled-binaries-arm64
+        # 要包含在压缩包里的文件路径 (每个文件占一行)
+        path: |
           pi_compare_combined
           width_check
-        if-no-files-found: warn # 如果找不到文件，发出警告
-      # 移除 displayName
+        # 如果找不到要上传的文件，发出警告而不是报错
+        if-no-files-found: warn
