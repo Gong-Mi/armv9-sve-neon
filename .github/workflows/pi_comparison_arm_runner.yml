@@ -1,0 +1,51 @@
+name: Compare Pi Calc NEON vs SVE on Native Arm Runner
+
+on: [push, workflow_dispatch] # Trigger on push or manually
+
+jobs:
+  compare_pi_perf:
+    # 使用特定版本的原生 Arm64 Runner (Ubuntu 24.04) 以保证环境一致性
+    # 这是基于 Azure Cobalt 100 / Neoverse N2 核心的
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+    - name: Checkout code
+      # 获取你仓库中的代码
+      uses: actions/checkout@v4
+
+    - name: Install Compiler (Clang recommended) and Utils
+      run: |
+        sudo apt-get update
+        # 安装 clang 和 build-essential (提供 make 等工具)
+        sudo apt-get install -y clang build-essential
+
+    - name: Check Compiler Version
+      # 打印编译器版本信息，方便调试和记录
+      run: clang --version
+
+    - name: Check SVE Width (using svcntb)
+      # 编译并运行一个小的检查程序，确认 SVE 位宽
+      # 这对于验证 Runner 环境至关重要
+      run: |
+        echo '#include <stdio.h>' > width_check.c
+        echo '#include <arm_sve.h>' >> width_check.c
+        echo '#include <stdint.h>' >> width_check.c
+        echo 'int main() { uint64_t bytes = svcntb(); if(bytes==0) return 1; printf("SVE Width: %llu bits\\n", (unsigned long long)bytes*8); return 0; }' >> width_check.c
+        clang width_check.c -o width_check -march=armv9-a -lm
+        echo "--- Running SVE Width Check ---"
+        ./width_check
+        echo "--- SVE Width Check End ---"
+
+    - name: Compile the Pi comparison code
+      # 确保下面的 C 文件名与你仓库中的文件名完全一致！
+      # 使用 clang (或根据需要改为 gcc)
+      # 使用 -march=armv9-a 同时启用 NEON 和 SVE/SVE2
+      # 添加 -Wall -Wextra 捕获更多潜在的编译警告
+      # 使用 -O3 进行优化
+      run: clang pi_compare_combined_fixed_v4.c -o pi_compare_combined -O3 -march=armv9-a -lm -Wall -Wextra
+
+    - name: Run the Pi comparison
+      # 设置一个合理的 N 值，例如 5 亿次，避免运行时间过长
+      # 在 Runner 环境中，通常不指定 target_core 参数，让程序在允许的核心上运行
+      # 程序内部逻辑会检测 GITHUB_ACTIONS 环境变量并跳过亲和性设置
+      run: ./pi_compare_combined 500000000
